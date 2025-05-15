@@ -114,6 +114,7 @@ func (a *Agent) executeTool(id, name string, input json.RawMessage) anthropic.Co
 	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, input)
 	response, err := toolDef.Function(input)
 	if err != nil {
+		fmt.Printf("\u001b[91mError\u001b[0m: %s\n", err.Error())
 		return anthropic.NewToolResultBlock(id, err.Error(), true)
 	}
 	return anthropic.NewToolResultBlock(id, response, false)
@@ -273,8 +274,14 @@ func EditFile(input json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	if editFileInput.Path == "" || editFileInput.OldStr == editFileInput.NewStr {
-		return "", fmt.Errorf("invalid input parameters")
+	if editFileInput.Path == "" {
+		return "", fmt.Errorf("invalid input parameters: path cannot be empty")
+	}
+	if editFileInput.OldStr == "" && editFileInput.NewStr == "" {
+		return "", fmt.Errorf("invalid input parameters: old_str and new_str cannot both be empty")
+	}
+	if editFileInput.OldStr == editFileInput.NewStr {
+		return "", fmt.Errorf("invalid input parameters: old_str and new_str cannot be the same")
 	}
 
 	content, err := os.ReadFile(editFileInput.Path)
