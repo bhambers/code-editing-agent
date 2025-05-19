@@ -4,25 +4,13 @@ require 'json'
 require 'fileutils'
 require 'anthropic'
 
-# Tool Definitions
-class ToolDefinition
-  attr_reader :name, :description, :input_schema, :function
-
-  def initialize(name, description, input_schema, function)
-    @name = name
-    @description = description
-    @input_schema = input_schema
-    @function = function
-  end
-end
+ToolDefinition = Struct.new(:name, :description, :input_schema, :function)
 
 class Agent
   attr_reader :tools
 
-  def initialize(client, get_user_message, tools)
-    @client = client
-    @get_user_message = get_user_message
-    @tools = tools
+  def initialize(client, tools)
+    @client, @tools = client, tools
   end
 
   def run
@@ -33,14 +21,12 @@ class Agent
     loop do
       if read_user_input
         print "\e[94mYou\e[0m: "
-        user_input, ok = @get_user_message.call
-        break unless ok
+        user_input = gets.chomp
 
-        user_message = {
+        conversation << Anthropic::Models::MessageParam.new(
           role: "user",
           content: [Anthropic::Models::TextBlockParam.new(text: user_input)]
-        }
-        conversation << user_message
+        )
       end
 
       message = run_inference(conversation)
@@ -54,24 +40,20 @@ class Agent
         case content[:type]
         when :text
           puts "\e[93mClaude\e[0m: #{content[:text]}"
+          read_user_input = true
         when :tool_use
           result = execute_tool(content[:id], content[:name], content[:input])
-          tool_results << result
+          conversation << { role: "user", content: [result] }
+          read_user_input = false
         else
           puts "\e[91mError\e[0m: Unknown content type #{content[:type].inspect}"
+          exit 1
         end
       end
-
-      if tool_results.empty?
-        read_user_input = true
-        next
-      end
-
-      read_user_input = false
-      conversation << { role: "user", content: tool_results }
     end
   end
 
+  # Why doesn't the SDK have a built-in way to do this?
   def convert_to_param(content)
     case content.type
     when :text
@@ -88,29 +70,20 @@ class Agent
   end
 
   def execute_tool(id, name, input)
-    tool_def = nil
-    found = false
+    tool = @tools.find { |tool| tool.name == name }
 
-    @tools.each do |tool|
-      if tool.name == name
-        tool_def = tool
-        found = true
-        break
-      end
-    end
-
-    unless found
-      return {
-        type: "tool_result",
+    unless tool
+      puts "\e[92mtool not found\e[0m: #{name}(#{input})"
+      return Anthropic::Models::ToolResultBlockParam.new(
         tool_use_id: id,
         content: "tool not found",
-        error: true
-      }
+        is_error: true
+      )
     end
 
     puts "\e[92mtool\e[0m: #{name}(#{input})"
     begin
-      response = tool_def.function.call(input)
+      response = tool.function.call(input)
       Anthropic::Models::ToolResultBlockParam.new(
         tool_use_id: id,
         content: response,
@@ -123,7 +96,6 @@ class Agent
         content: e.message,
         is_error: true
       )
-      raise
     end
   end
 
@@ -150,59 +122,39 @@ def read_file(params)
   path = params[:path]
   raise "Path cannot be empty" if path.nil? || path.empty?
 
-  content = File.read(path)
-  content
-rescue Errno::ENOENT
-  raise "File not found"
+  begin
+    File.read(path)
+  rescue Errno::ENOENT
+    raise "File not found"
+  end
 end
 
 def list_files(params)
-  path = params["path"] || "."
+  path = params[:path] || "."
   
-  files = []
-  Dir.glob("#{path}/**/*").each do |file|
-    if File.directory?(file)
-      files << "#{file}/"
-    else
-      files << file
-    end
+  files = Dir.glob("#{path}/**/*").map do |file|
+    File.directory?(file) ? "#{file}/" : file
   end
-  
   files.to_json
-rescue Errno::ENOENT
-  raise "Directory not found"
 end
 
 def edit_file(params)
-  path = params["path"]
-  old_str = params["old_str"]
-  new_str = params["new_str"]
+  path, old_str, new_str = params[:path], params[:old_str] || "", params[:new_str] || ""
 
   raise "Path cannot be empty" if path.nil? || path.empty?
-  raise "old_str and new_str cannot both be empty" if old_str.nil? && new_str.nil?
+  raise "old_str and new_str cannot both be empty" if old_str == "" && new_str == ""
   raise "old_str and new_str cannot be the same" if old_str == new_str
 
-  if !File.exist?(path) && old_str.nil?
-    return create_new_file(path, new_str)
-  end
+  return create_new_file(path, new_str) if !File.exist?(path) && old_str == ""
 
-  content = File.read(path)
-  new_content = content.gsub(old_str, new_str)
-
-  if content == new_content && !old_str.nil?
-    raise "old_str not found in file"
-  end
-
+  new_content = File.read(path).gsub(old_str, new_str)
   File.write(path, new_content)
   "OK"
 end
 
 def create_new_file(file_path, content)
   dir = File.dirname(file_path)
-  if dir != "."
-    FileUtils.mkdir_p(dir)
-  end
-
+  FileUtils.mkdir_p(dir) if dir != "."
   File.write(file_path, content)
   "Successfully created file #{file_path}"
 end
@@ -267,22 +219,8 @@ edit_file_definition = ToolDefinition.new(
   method(:edit_file)
 )
 
-# Main execution
-if __FILE__ == $PROGRAM_NAME
-  # Initialize Anthropic client
-  client = Anthropic::Client.new(api_key: ENV["ANTHROPIC_API_KEY"])
+client = Anthropic::Client.new(api_key: ENV["ANTHROPIC_API_KEY"])
+tools = [read_file_definition, list_files_definition, edit_file_definition]
+agent = Agent.new(client, tools)
 
-  # Set up user input function
-  get_user_message = lambda do
-    input = gets
-    return nil, false if input.nil?
-    return input.chomp, true
-  end
-
-  # Set up tools
-  tools = [read_file_definition, list_files_definition, edit_file_definition]
-
-  # Create and run agent
-  agent = Agent.new(client, get_user_message, tools)
-  agent.run
-end
+agent.run
