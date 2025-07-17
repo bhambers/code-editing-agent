@@ -2,6 +2,10 @@
 
 A command-line interface (CLI) application that lets you interact with Claude AI assistant directly from your terminal, with file system access capabilities.
 
+## Reference Article 
+
+[How to Build an Agent](https://ampcode.com/how-to-build-an-agent) by Thorsten Ball. 
+
 ## Overview
 
 This project implements a CLI agent that connects to Anthropic's Claude API, allowing you to:
